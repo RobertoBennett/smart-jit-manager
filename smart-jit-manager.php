@@ -2,8 +2,10 @@
 /**
  * Plugin Name: Smart JIT Manager
  * Description: Умное управление OPcache JIT для WordPress. Баланс скорости и стабильности.
+ * Plugin URI: https://github.com/RobertoBennett/smart-jit-manager
  * Version: 1.0.2
- * Author: Your Name
+ * Author: Robert Bennett
+ * Text Domain: Smart JIT Manager
  * License: GPL v2 or later
  */
 
@@ -385,5 +387,6 @@ opcache.jit_max_trace_points=100000</pre>
         }
     }
 }
+
 
 new SmartJITManager();
