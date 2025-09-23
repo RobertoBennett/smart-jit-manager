@@ -23,6 +23,13 @@ class SmartJITManager {
     private $last_post_modified = '';
     private $opcache_restricted = false;
     
+    // НАСТРОЙКИ ОТКЛЮЧЕНИЯ КЭШИРОВАНИЯ
+    private $disable_jit_for_bots = true;
+    private $disable_jit_for_speed_tests = true; // НОВЫЙ ПАРАМЕТР
+    private $disable_page_cache_for_speed_tests = false;
+    private $disable_object_cache_for_speed_tests = false;
+    private $disable_browser_cache_for_speed_tests = true;
+    
     public function __construct() {
         $this->init();
     }
@@ -84,6 +91,13 @@ class SmartJITManager {
     
     public function load_settings() {
         $this->safe_mode = get_option('smart_jit_safe_mode', '1') === '1';
+        
+        // НАСТРОЙКИ ОТКЛЮЧЕНИЯ КЭШИРОВАНИЯ
+        $this->disable_jit_for_bots = get_option('smart_jit_disable_jit_for_bots', '1') === '1';
+        $this->disable_jit_for_speed_tests = get_option('smart_jit_disable_jit_for_speed_tests', '1') === '1'; // ПО УМОЛЧАНИЮ ВКЛЮЧЕНО
+        $this->disable_page_cache_for_speed_tests = get_option('smart_jit_disable_page_cache_for_speed_tests', '0') === '1';
+        $this->disable_object_cache_for_speed_tests = get_option('smart_jit_disable_object_cache_for_speed_tests', '0') === '1';
+        $this->disable_browser_cache_for_speed_tests = get_option('smart_jit_disable_browser_cache_for_speed_tests', '1') === '1';
     }
     
     public function detect_user_type() {
@@ -220,43 +234,48 @@ class SmartJITManager {
         
         return ($ip & $mask) == $subnet;
     }
-    // КОНЕЦ ДОБАВЛЕННЫХ МЕТОДОВ
     
     public function maybe_disable_caching_plugins() {
         if (!$this->is_speed_test_bot || is_admin()) {
             return;
         }
         
-        // Отключаем популярные плагины кеширования
-        add_filter('wp_super_cache_eanbled', '__return_false');
-        add_filter('w3tc_late_caching_content', '__return_false');
-        add_filter('w3tc_can_cache', '__return_false');
-        add_filter('rocket_htaccess_mod_rewrite', '__return_false');
-        add_filter('autoptimize_filter_noptimize', '__return_true');
-        
-        // Отключаем кеширование в WP Rocket
-        if (defined('WP_ROCKET_VERSION')) {
-            add_filter('do_rocket_generate_caching_files', '__return_false');
-            add_filter('rocket_display_varnish_options_tab', '__return_false');
+        // Отключаем плагины кеширования только если включена соответствующая опция
+        if ($this->disable_page_cache_for_speed_tests) {
+            add_filter('wp_super_cache_eanbled', '__return_false');
+            add_filter('w3tc_late_caching_content', '__return_false');
+            add_filter('w3tc_can_cache', '__return_false');
+            add_filter('rocket_htaccess_mod_rewrite', '__return_false');
+            
+            // Отключаем кеширование в WP Rocket
+            if (defined('WP_ROCKET_VERSION')) {
+                add_filter('do_rocket_generate_caching_files', '__return_false');
+                add_filter('rocket_display_varnish_options_tab', '__return_false');
+            }
+            
+            // Отключаем кеширование в W3 Total Cache
+            if (defined('W3TC_VERSION')) {
+                define('DONOTCACHEPAGE', true);
+                define('DONOTCDN', true);
+                define('DONOTCACHCEOBJECT', true);
+            }
+            
+            // Отключаем кеширование в WP Super Cache
+            if (defined('WP_CACHE') && WP_CACHE) {
+                define('DONOTCACHEPAGE', true);
+            }
         }
         
-        // Отключаем кеширование в W3 Total Cache
-        if (defined('W3TC_VERSION')) {
-            define('DONOTCACHEPAGE', true);
-            define('DONOTCDN', true);
-            define('DONOTCACHCEOBJECT', true);
+        // Отключаем оптимизацию только если отключено кеширование страниц
+        if ($this->disable_page_cache_for_speed_tests) {
+            add_filter('autoptimize_filter_noptimize', '__return_true');
         }
         
-        // Отключаем кеширование в WP Super Cache
-        if (defined('WP_CACHE') && WP_CACHE) {
-            define('DONOTCACHEPAGE', true);
-        }
-        
-        error_log('[SmartJIT] Caching plugins disabled for speed test bot');
+        error_log('[SmartJIT] Caching plugins disabled with selective settings');
     }
     
     public function add_no_cache_headers() {
-        if (!$this->is_speed_test_bot || is_admin()) {
+        if (!$this->is_speed_test_bot || is_admin() || !$this->disable_browser_cache_for_speed_tests) {
             return;
         }
         
@@ -278,7 +297,7 @@ class SmartJITManager {
     }
     
     public function modify_response_headers($headers) {
-        if (!$this->is_speed_test_bot || is_admin()) {
+        if (!$this->is_speed_test_bot || is_admin() || !$this->disable_browser_cache_for_speed_tests) {
             return $headers;
         }
         
@@ -332,32 +351,39 @@ class SmartJITManager {
     }
     
     private function set_speed_test_settings() {
-        // 📊 МАКСИМАЛЬНАЯ ПРОИЗВОДИТЕЛЬНОСТЬ для тестов скорости
-        @ini_set('opcache.jit', '1235');
-        @ini_set('opcache.revalidate_freq', '0'); // Минимальная задержка
-        @ini_set('opcache.validate_timestamps', '1'); // Всегда свежий контент
-        @ini_set('opcache.enable', '1');
-        @ini_set('opcache.enable_cli', '0');
+        if ($this->disable_jit_for_speed_tests) {
+            // 🚫 ОТКЛЮЧАЕМ JIT ДЛЯ ТЕСТОВ СКОРОСТИ (убираем задержку 2 секунды)
+            @ini_set('opcache.jit', 'disable');
+            @ini_set('opcache.enable', '0');
+            error_log('[SmartJIT] JIT DISABLED for speed tests to remove 2-second delay');
+        } else {
+            // 📊 МАКСИМАЛЬНАЯ ПРОИЗВОДИТЕЛЬНОСТЬ для тестов скорости
+            @ini_set('opcache.jit', '1235');
+            @ini_set('opcache.revalidate_freq', '0'); // Минимальная задержка
+            @ini_set('opcache.validate_timestamps', '1'); // Всегда свежий контент
+            @ini_set('opcache.enable', '1');
+            @ini_set('opcache.enable_cli', '0');
+            
+            // Оптимальные лимиты для максимальной скорости
+            @ini_set('opcache.jit_max_trace_points', '15000');
+            @ini_set('opcache.jit_max_polymorphic_calls', '6000');
+            @ini_set('opcache.jit_max_loop_unrolls', '10');
+            @ini_set('opcache.jit_hot_func', '150');
+            @ini_set('opcache.jit_hot_loop', '150');
+            
+            error_log('[SmartJIT] Maximum performance mode for speed test bot');
+        }
         
-        // Оптимальные лимиты для максимальной скорости
-        @ini_set('opcache.jit_max_trace_points', '15000');
-        @ini_set('opcache.jit_max_polymorphic_calls', '6000');
-        @ini_set('opcache.jit_max_loop_unrolls', '10');
-        @ini_set('opcache.jit_hot_func', '150');
-        @ini_set('opcache.jit_hot_loop', '150');
-        
-        // Отключаем ограничения для тестов
+        // Отключаем ограничения для тестов (всегда)
         @ini_set('max_execution_time', '300');
         @ini_set('max_input_time', '300');
         @ini_set('memory_limit', '512M');
-        
-        error_log('[SmartJIT] Maximum performance mode for speed test bot');
     }
     
     private function set_bot_safe_settings() {
         $user_agent = strtolower($_SERVER['HTTP_USER_AGENT'] ?? '');
         
-        // Критические боты - полное отключение JIT
+        // Критические боты - отключаем JIT если включена опция
         $critical_bots = ['googlebot', 'yandex', 'bingbot'];
         $is_critical_bot = false;
         
@@ -368,7 +394,7 @@ class SmartJITManager {
             }
         }
         
-        if ($is_critical_bot) {
+        if ($is_critical_bot && $this->disable_jit_for_bots) {
             @ini_set('opcache.jit', 'disable');
             @ini_set('opcache.enable', '0');
             error_log('[SmartJIT] JIT disabled for critical bot: ' . $user_agent);
@@ -429,8 +455,11 @@ class SmartJITManager {
         // 2. Пытаемся очистить Opcache (если доступно)
         $opcache_cleared = $this->safe_opcache_clear();
         
-        // 3. Очищаем объектный кеш
-        $object_cache_cleared = $this->clear_object_cache();
+        // 3. Очищаем объектный кеш (если включена опция)
+        $object_cache_cleared = false;
+        if ($this->disable_object_cache_for_speed_tests) {
+            $object_cache_cleared = $this->clear_object_cache();
+        }
         
         // Логируем результат
         error_log(sprintf(
@@ -527,8 +556,10 @@ class SmartJITManager {
             }
         }
         
-        // Очистка объектного кеша
-        $this->clear_object_cache();
+        // Очистка объектного кеша (если включена)
+        if ($this->disable_object_cache_for_speed_tests) {
+            $this->clear_object_cache();
+        }
         
         error_log('[SmartJIT] Aggressive cache clear completed');
     }
@@ -579,12 +610,23 @@ class SmartJITManager {
         $bot_type = 'human';
         $speed_test = 'no';
         $cache_enabled = 'yes';
+        $cache_settings = 'default';
+        $jit_disabled_for_speed = 'no';
         
         if ($this->is_speed_test_bot) {
             $bot_type = 'speed-test';
             $speed_test = 'yes';
-            $cache_enabled = 'no';
-            $mode = 'MAX-PERFORMANCE';
+            $jit_disabled_for_speed = $this->disable_jit_for_speed_tests ? 'yes' : 'no';
+            
+            // Определяем настройки кэширования для тестов скорости
+            $cache_settings = [];
+            if ($this->disable_page_cache_for_speed_tests) $cache_settings[] = 'no-page-cache';
+            if ($this->disable_object_cache_for_speed_tests) $cache_settings[] = 'no-object-cache';
+            if ($this->disable_browser_cache_for_speed_tests) $cache_settings[] = 'no-browser-cache';
+            $cache_settings = empty($cache_settings) ? 'full-cache' : implode(',', $cache_settings);
+            
+            $cache_enabled = $cache_settings === 'full-cache' ? 'yes' : 'partial';
+            $mode = $this->disable_jit_for_speed_tests ? 'JIT-DISABLED-for-speed' : 'MAX-PERFORMANCE';
         } elseif ($this->is_bot) {
             $critical_bots = ['googlebot', 'yandex', 'bingbot'];
             $user_agent_lower = strtolower($user_agent);
@@ -598,8 +640,9 @@ class SmartJITManager {
                 }
             }
             
-            if ($is_critical) {
+            if ($is_critical && $this->disable_jit_for_bots) {
                 $mode = 'DISABLED-for-critical-bot';
+                $cache_enabled = 'jit-disabled';
             } else {
                 $mode = 'SAFE-for-bot';
                 if (stripos($user_agent, 'pinterest') !== false) $bot_type = 'pinterest';
@@ -619,7 +662,10 @@ class SmartJITManager {
         header('X-OPCache-Restricted: ' . ($this->opcache_restricted ? 'yes' : 'no'));
         header('X-Speed-Test-Bot: ' . $speed_test);
         header('X-Cache-Enabled: ' . $cache_enabled);
+        header('X-Cache-Settings: ' . $cache_settings);
         header('X-Detected-Bot: ' . $bot_type);
+        header('X-JIT-Disabled-For-Bots: ' . ($this->disable_jit_for_bots ? 'yes' : 'no'));
+        header('X-JIT-Disabled-For-Speed-Tests: ' . $jit_disabled_for_speed);
     }
     
     public function show_buffer_warning() {
@@ -667,6 +713,11 @@ class SmartJITManager {
     
     public function settings_init() {
         register_setting('smart_jit_settings', 'smart_jit_safe_mode');
+        register_setting('smart_jit_settings', 'smart_jit_disable_jit_for_bots');
+        register_setting('smart_jit_settings', 'smart_jit_disable_jit_for_speed_tests'); // НОВАЯ ОПЦИЯ
+        register_setting('smart_jit_settings', 'smart_jit_disable_page_cache_for_speed_tests');
+        register_setting('smart_jit_settings', 'smart_jit_disable_object_cache_for_speed_tests');
+        register_setting('smart_jit_settings', 'smart_jit_disable_browser_cache_for_speed_tests');
         
         add_settings_section(
             'smart_jit_section',
@@ -679,6 +730,14 @@ class SmartJITManager {
             'safe_mode',
             'Режим работы',
             [$this, 'safe_mode_callback'],
+            'smart_jit_settings',
+            'smart_jit_section'
+        );
+        
+        add_settings_field(
+            'cache_settings',
+            'Настройки отключения кэширования',
+            [$this, 'cache_settings_callback'],
             'smart_jit_settings',
             'smart_jit_section'
         );
@@ -710,64 +769,70 @@ class SmartJITManager {
         <?php
     }
     
+    public function cache_settings_callback() {
+        $disable_jit_for_bots = get_option('smart_jit_disable_jit_for_bots', '1');
+        $disable_jit_for_speed_tests = get_option('smart_jit_disable_jit_for_speed_tests', '1'); // ПО УМОЛЧАНИЮ ВКЛЮЧЕНО
+        $disable_page_cache = get_option('smart_jit_disable_page_cache_for_speed_tests', '0');
+        $disable_object_cache = get_option('smart_jit_disable_object_cache_for_speed_tests', '0');
+        $disable_browser_cache = get_option('smart_jit_disable_browser_cache_for_speed_tests', '1');
+        ?>
+        
+        <h4>Для поисковых ботов (Google, Yandex, Bing):</h4>
+        <label>
+            <input type="checkbox" name="smart_jit_disable_jit_for_bots" value="1" <?php checked($disable_jit_for_bots, '1'); ?>>
+            Отключать JIT для критических поисковых ботов
+        </label>
+        <p class="description">Рекомендуется для стабильности индексации</p>
+        
+        <h4>Для тестов скорости (PageSpeed, GTmetrix, Pingdom):</h4>
+        <label>
+            <input type="checkbox" name="smart_jit_disable_jit_for_speed_tests" value="1" <?php checked($disable_jit_for_speed_tests, '1'); ?>>
+            <strong>🚫 ОТКЛЮЧАТЬ JIT для тестов скорости (убирает задержку 2 секунды)</strong>
+        </label>
+        <p class="description"><strong>ВАЖНО:</strong> JIT может добавлять задержку при первом запуске. Отключение ускоряет тесты.</p>
+        
+        <label>
+            <input type="checkbox" name="smart_jit_disable_page_cache_for_speed_tests" value="1" <?php checked($disable_page_cache, '1'); ?>>
+            Отключать кэширование страниц (плагины кэширования)
+        </label>
+        <br>
+        <label>
+            <input type="checkbox" name="smart_jit_disable_object_cache_for_speed_tests" value="1" <?php checked($disable_object_cache, '1'); ?>>
+            Отключать объектный кэш (Redis, Memcached, APCu)
+        </label>
+        <br>
+        <label>
+            <input type="checkbox" name="smart_jit_disable_browser_cache_for_speed_tests" value="1" <?php checked($disable_browser_cache, '1'); ?>>
+            Отключать браузерное кэширование (Cache-Control headers)
+        </label>
+        <p class="description">Настройте, какие типы кэширования отключать при тестировании скорости</p>
+        <?php
+    }
+    
     public function options_page_html() {
         if (!current_user_can('manage_options')) {
             return;
         }
         ?>
         <div class="wrap">
-            <h1>Умное управление JIT v1.5.1</h1>
+            <h1>Умное управление JIT v1.2.1</h1>
             
             <div class="card">
-                <h2>🚀 Режим максимальной производительности для тестов скорости</h2>
+                <h2>🚀 Выборочное отключение кэширования</h2>
                 <p><strong>Статус:</strong> <?php echo $this->is_recent_post_modified() ? '🟡 Активен безопасный режим' : '🟢 Нормальный режим'; ?></p>
                 <p><strong>Opcache доступен:</strong> <?php echo $this->opcache_restricted ? '❌ Ограничен' : '✅ Доступен'; ?></p>
-                <p><strong>Режим тестирования:</strong> ✅ Активен (кеширование отключено для ботов скорости)</p>
+                <p><strong>Отключение JIT для ботов:</strong> <?php echo $this->disable_jit_for_bots ? '✅ Включено' : '❌ Выключено'; ?></p>
+                <p><strong>Отключение JIT для тестов скорости:</strong> <?php echo $this->disable_jit_for_speed_tests ? '✅ Включено' : '❌ Выключено'; ?></p>
+                <p><strong>Отключение кэша страниц:</strong> <?php echo $this->disable_page_cache_for_speed_tests ? '✅ Включено' : '❌ Выключено'; ?></p>
+                <p><strong>Отключение объектного кэша:</strong> <?php echo $this->disable_object_cache_for_speed_tests ? '✅ Включено' : '❌ Выключено'; ?></p>
+                <p><strong>Отключение браузерного кэша:</strong> <?php echo $this->disable_browser_cache_for_speed_tests ? '✅ Включено' : '❌ Выключено'; ?></p>
             </div>
             
-            <div class="card">
-                <h3>📊 Настройки для тестов скорости</h3>
-                <ul>
-                    <li>✅ <strong>JIT 1235</strong> - максимальная оптимизация</li>
-                    <li>✅ <strong>Кеширование отключено</strong> - чистые замеры</li>
-                    <li>✅ <strong>Плагины кеширования отключены</strong></li>
-                    <li>✅ <strong>Увеличены лимиты</strong> - для точных тестов</li>
-                </ul>
-            </div>
-            
-            <div class="card">
-                <h3>🔧 Ручное управление кешем</h3>
-                <form method="post">
-                    <?php wp_nonce_field('clear_cache', 'clear_cache_nonce'); ?>
-                    <button type="submit" name="clear_cache" class="button button-primary">🗑️ Принудительно очистить весь кеш</button>
-                    <p class="description">Особенно полезно перед запуском тестов скорости</p>
-                </form>
-            </div>
-            
-            <?php
-            if (isset($_POST['clear_cache']) && wp_verify_nonce($_POST['clear_cache_nonce'], 'clear_cache')) {
-                $this->force_cache_clear(0);
-                echo '<div class="notice notice-success"><p>✅ Кеш очищен: rewrite rules + object cache' . 
-                     ($this->opcache_restricted ? '' : ' + opcache') . '</p></div>';
-            }
-            ?>
-            
-            <div class="card">
-                <h3>🎯 Поддерживаемые сервисы тестирования</h3>
-                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px;">
-                    <div style="padding: 10px; background: #e3f2fd; border-radius: 5px;">
-                        <strong>Google PageSpeed</strong><br>Полная поддержка
-                    </div>
-                    <div style="padding: 10px; background: #e8f5e8; border-radius: 5px;">
-                        <strong>GTmetrix</strong><br>Кеш отключен
-                    </div>
-                    <div style="padding: 10px; background: #fff3e0; border-radius: 5px;">
-                        <strong>Pingdom</strong><br>Макс. производительность
-                    </div>
-                    <div style="padding: 10px; background: #fce4ec; border-radius: 5px;">
-                        <strong>WebPageTest</strong><br>Точные замеры
-                    </div>
-                </div>
+            <div class="card" style="border-left-color: #ff6b6b;">
+                <h2>⚠️ Важная информация о JIT и тестах скорости</h2>
+                <p><strong>Проблема:</strong> JIT компиляция может добавлять задержку до 2 секунд при первом запуске.</p>
+                <p><strong>Решение:</strong> Отключение JIT для тестов скорости устраняет эту задержку и показывает реальную производительность.</p>
+                <p><strong>Рекомендация:</strong> Оставьте включенным "Отключать JIT для тестов скорости" для точных замеров.</p>
             </div>
             
             <form action="options.php" method="post">
@@ -777,6 +842,36 @@ class SmartJITManager {
                 submit_button('Сохранить настройки');
                 ?>
             </form>
+            
+            <div class="card">
+                <h3>📊 Текущие настройки JIT</h3>
+                <table class="widefat">
+                    <thead>
+                        <tr>
+                            <th>Параметр</th>
+                            <th>Значение</th>
+                            <th>Описание</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><code>opcache.jit</code></td>
+                            <td><strong><?php echo esc_html(ini_get('opcache.jit')); ?></strong></td>
+                            <td>Режим JIT компиляции</td>
+                        </tr>
+                        <tr>
+                            <td><code>opcache.jit_buffer_size</code></td>
+                            <td><strong><?php echo esc_html(ini_get('opcache.jit_buffer_size')); ?></strong></td>
+                            <td>Размер буфера для JIT кода</td>
+                        </tr>
+                        <tr>
+                            <td><code>opcache.enable</code></td>
+                            <td><strong><?php echo esc_html(ini_get('opcache.enable')); ?></strong></td>
+                            <td>Включен ли Opcache</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
         </div>
         
         <style>
@@ -792,21 +887,80 @@ class SmartJITManager {
         <?php
     }
     
-    public function add_admin_bar_status($admin_bar) {
+    public function add_admin_bar_status($wp_admin_bar) {
         if (!current_user_can('manage_options')) {
             return;
         }
         
-        $status = $this->safe_mode ? '🟢 Безопасный' : '🟡 Экспертный';
-        $restricted = $this->opcache_restricted ? ' 🔒' : '';
+        $jit_mode = ini_get('opcache.jit');
+        $jit_buffer = ini_get('opcache.jit_buffer_size');
+        $opcache_enabled = ini_get('opcache.enable');
         
-        $admin_bar->add_node([
-            'id'    => 'jit-status',
-            'title' => "JIT: {$status}{$restricted} | Буфер: {$this->current_jit_buffer}",
-            'href'  => admin_url('options-general.php?page=smart-jit-manager'),
-            'meta'  => ['title' => 'Статус JIT оптимизации']
+        $title = 'JIT: ';
+        
+        if ($opcache_enabled !== '1') {
+            $title .= '❌ Off';
+        } elseif ($jit_mode === 'disable' || empty($jit_mode)) {
+            $title .= '🚫 Disabled';
+        } else {
+            $title .= '🚀 ' . $jit_mode;
+        }
+        
+        // Добавляем информацию о настройках скорости
+        if ($this->disable_jit_for_speed_tests) {
+            $title .= ' | ⚡ No-JIT for tests';
+        }
+        
+        $wp_admin_bar->add_node([
+            'id' => 'jit-status',
+            'title' => $title,
+            'href' => admin_url('options-general.php?page=smart-jit-manager'),
+            'meta' => [
+                'title' => 'JIT Buffer: ' . $jit_buffer . ' | Opcache: ' . ($opcache_enabled ? 'On' : 'Off')
+            ]
+        ]);
+        
+        $wp_admin_bar->add_node([
+            'id' => 'jit-settings',
+            'parent' => 'jit-status',
+            'title' => '⚙️ Настройки JIT',
+            'href' => admin_url('options-general.php?page=smart-jit-manager')
+        ]);
+        
+        $wp_admin_bar->add_node([
+            'id' => 'jit-speed-settings',
+            'parent' => 'jit-status',
+            'title' => '📊 Тесты скорости: ' . 
+                ($this->disable_jit_for_speed_tests ? 'JIT отключен' : 'JIT включен'),
+            'href' => admin_url('options-general.php?page=smart-jit-manager#cache-settings')
         ]);
     }
 }
 
+// Инициализация плагина
 new SmartJITManager();
+
+// Хук активации плагина
+register_activation_hook(__FILE__, function() {
+    add_option('smart_jit_safe_mode', '1');
+    add_option('smart_jit_disable_jit_for_bots', '1');
+    add_option('smart_jit_disable_jit_for_speed_tests', '1'); // ПО УМОЛЧАНИЮ ВКЛЮЧЕНО
+    add_option('smart_jit_disable_page_cache_for_speed_tests', '0');
+    add_option('smart_jit_disable_object_cache_for_speed_tests', '0');
+    add_option('smart_jit_disable_browser_cache_for_speed_tests', '1');
+    add_option('smart_jit_last_post_modified', '');
+});
+
+// Хук деактивации
+register_deactivation_hook(__FILE__, function() {
+    // Восстанавливаем стандартные настройки при деактивации
+    if (function_exists('ini_set')) {
+        @ini_restore('opcache.jit');
+        @ini_restore('opcache.revalidate_freq');
+        @ini_restore('opcache.validate_timestamps');
+    }
+});
+?>
+
+new SmartJITManager();
+
